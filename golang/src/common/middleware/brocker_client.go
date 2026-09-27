@@ -21,6 +21,10 @@ type BrokerClient struct {
 	closed  bool
 }
 
+/*
+ * Abre una conexion y un canal con RabbitMQ
+ * Recibe settings con el hostname y el puerto del broker
+ */
 func NewBrokerClient(settings ConnSettings) (*BrokerClient, error) {
 	address := fmt.Sprintf("amqp://guest:guest@%s:%d/", settings.Hostname, settings.Port)
 	// Conexion con RabbitMQ
@@ -40,6 +44,10 @@ func NewBrokerClient(settings ConnSettings) (*BrokerClient, error) {
 	return c, nil
 }
 
+/*
+ * Declara una cola compartida para enviar y consumir mensajes
+ * Recibe el nombre de la cola
+ */
 func (c *BrokerClient) DeclareQueue(name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -55,6 +63,10 @@ func (c *BrokerClient) DeclareQueue(name string) error {
 	return err
 }
 
+/*
+ * Declara un exchange de tipo direct para enrutar por coincidencia de key
+ * Recibe el nombre del exchange
+ */
 func (c *BrokerClient) DeclareExchange(name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -70,6 +82,10 @@ func (c *BrokerClient) DeclareExchange(name string) error {
 	)
 }
 
+/*
+ * Publica el mensaje una vez por cada routing key
+ * Recibe exchange, keys de destino y msg a enviar
+ */
 func (c *BrokerClient) Publish(exchange string, keys []string, msg Message) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -100,14 +116,26 @@ func (c *BrokerClient) Publish(exchange string, keys []string, msg Message) erro
 	return nil
 }
 
+/*
+ * Consume una cola hasta que pare el consumo o haya un error
+ * Recibe queueName y un callback que debe llamar a ack o nack antes de retornar
+ */
 func (c *BrokerClient) StartConsuming(queueName string, callback func(Message, func(), func())) error {
 	return c.consume(queueName, "", nil, callback)
 }
 
+/*
+ * Consume el exchange mediante una cola privada vinculada a las keys indicadas
+ * Recibe exchange, keys y un callback que debe llamar a ack o nack antes de retornar
+ */
 func (c *BrokerClient) StartExchangeConsuming(exchange string, keys []string, callback func(Message, func(), func())) error {
 	return c.consume("", exchange, keys, callback)
 }
 
+/*
+ * Procesa las entregas en serie y comprueba los errores de ACK/NACK
+ * Recibe queueName o exchange con keys, y un callback
+ */
 func (c *BrokerClient) consume(queueName string, exchange string, keys []string, callback func(Message, func(), func())) error {
 	if callback == nil {
 		return fmt.Errorf("consume: %w: nil callback", ErrMessageMiddlewareMessage)
@@ -178,6 +206,10 @@ func (c *BrokerClient) consume(queueName string, exchange string, keys []string,
 	return fmt.Errorf("consume: %w: deliveries channel closed", ErrMessageMiddlewareMessage)
 }
 
+/*
+ * Configura el prefetch e inicia el consumidor
+ * Recibe queueName para una cola existente, o exchange y keys para una suscripcion privada
+ */
 func (c *BrokerClient) startConsumer(queueName string, exchange string, keys []string) (<-chan amqp.Delivery, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -239,7 +271,10 @@ func (c *BrokerClient) startConsumer(queueName string, exchange string, keys []s
 	return messages, nil
 }
 
-// Mu tomado para no intercalar con StopConsuming o Close
+/*
+ * Crea una cola exclusiva y la vincula al exchange
+ * Recibe el nombre del exchange y las routing keys que debe escuchar
+ */
 func (c *BrokerClient) declareSubscription(exchange string, keys []string) (string, error) {
 	queue, err := c.channel.QueueDeclare(
 		"",    // name
@@ -272,7 +307,10 @@ func (c *BrokerClient) declareSubscription(exchange string, keys []string) (stri
 	return queue.Name, nil
 }
 
-// Mu tomado. Un error de binding puede cerrar el canal original, pero dejar la cola.
+/*
+ * Elimina una cola de suscripcion, abriendo otro canal si hace falta
+ * Recibe name con el nombre de la cola a eliminar
+ */
 func (c *BrokerClient) deleteSubscription(name string) (err error) {
 	if c.conn.IsClosed() {
 		// RabbitMQ elimina las colas exclusivas al cerrar su conexion.
@@ -294,6 +332,10 @@ func (c *BrokerClient) deleteSubscription(name string) (err error) {
 	return err
 }
 
+/*
+ * Cancela el consumidor activo sin cerrar la conexion ni esperar al callback
+ * Si ya esta detenido, no hace nada
+ */
 func (c *BrokerClient) StopConsuming() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -320,6 +362,9 @@ func (c *BrokerClient) StopConsuming() error {
 	return nil
 }
 
+/*
+ * Cierra el canal y la conexion, informando los errores de cierre
+ */
 func (c *BrokerClient) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
