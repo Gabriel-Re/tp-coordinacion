@@ -23,10 +23,10 @@ type AggregationConfig struct {
 }
 
 type Aggregation struct {
-	outputQueue   middleware.Middleware
-	inputExchange middleware.Middleware
-	fruitItemMap  map[string]fruititem.FruitItem
-	topSize       int
+	outputQueue        middleware.Middleware
+	inputExchange      middleware.Middleware
+	fruitItemsByClient map[uint64]map[string]fruititem.FruitItem
+	topSize            int
 }
 
 func NewAggregation(config AggregationConfig) (*Aggregation, error) {
@@ -45,10 +45,10 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	}
 
 	return &Aggregation{
-		outputQueue:   outputQueue,
-		inputExchange: inputExchange,
-		fruitItemMap:  map[string]fruititem.FruitItem{},
-		topSize:       config.TopSize,
+		outputQueue:        outputQueue,
+		inputExchange:      inputExchange,
+		fruitItemsByClient: map[uint64]map[string]fruititem.FruitItem{},
+		topSize:            config.TopSize,
 	}, nil
 }
 
@@ -90,12 +90,16 @@ func (aggregation *Aggregation) handleMessage(msg middleware.Message) error {
 		return nil
 	}
 
-	aggregation.handleDataMessage(message.Records)
+	aggregation.handleDataMessage(message.ClientID, message.Records)
 	return nil
 }
 
+/*
+ * Envia el top y el EOF del cliente  
+ * elimina su estado solo si ambos envios son correctos
+ */
 func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error {
-	fruitTopRecords := aggregation.buildFruitTop()
+	fruitTopRecords := aggregation.buildFruitTop(aggregation.fruitItemsByClient[clientID])
 	message, err := inner.SerializeMessage(clientID, false, fruitTopRecords)
 	if err != nil {
 		return err
@@ -103,7 +107,7 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error
 	if err := aggregation.outputQueue.Send(*message); err != nil {
 		return fmt.Errorf("enviar resultado: %w", err)
 	}
-	slog.Info("Resultado enviado", "aggregation", "client_id", clientID, "records", len(fruitTopRecords))
+	slog.Info("aggregation: Resultado enviado", "client_id", clientID, "records", len(fruitTopRecords))
 
 	eofMessage := []fruititem.FruitItem{}
 	message, err = inner.SerializeMessage(clientID, true, eofMessage)
@@ -113,23 +117,33 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error
 	if err := aggregation.outputQueue.Send(*message); err != nil {
 		return fmt.Errorf("enviar EOF: %w", err)
 	}
+	delete(aggregation.fruitItemsByClient, clientID)
 	slog.Info("EOF enviado", "aggregation", "client_id", clientID)
 	return nil
 }
 
-func (aggregation *Aggregation) handleDataMessage(fruitRecords []fruititem.FruitItem) {
+/*
+ * Crea el acumulador del cliente si hace falta y combina los registros usando Sum
+ */
+func (aggregation *Aggregation) handleDataMessage(clientID uint64, fruitRecords []fruititem.FruitItem) {
+	fruitItemMap, ok := aggregation.fruitItemsByClient[clientID]
+	if !ok {
+		fruitItemMap = map[string]fruititem.FruitItem{}
+		aggregation.fruitItemsByClient[clientID] = fruitItemMap
+		slog.Info("Acumulador creado", "aggregation", "client_id", clientID)
+	}
 	for _, fruitRecord := range fruitRecords {
-		if _, ok := aggregation.fruitItemMap[fruitRecord.Fruit]; ok {
-			aggregation.fruitItemMap[fruitRecord.Fruit] = aggregation.fruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
+		if _, ok := fruitItemMap[fruitRecord.Fruit]; ok {
+			fruitItemMap[fruitRecord.Fruit] = fruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
 		} else {
-			aggregation.fruitItemMap[fruitRecord.Fruit] = fruitRecord
+			fruitItemMap[fruitRecord.Fruit] = fruitRecord
 		}
 	}
 }
 
-func (aggregation *Aggregation) buildFruitTop() []fruititem.FruitItem {
-	fruitItems := make([]fruititem.FruitItem, 0, len(aggregation.fruitItemMap))
-	for _, item := range aggregation.fruitItemMap {
+func (aggregation *Aggregation) buildFruitTop(fruitItemMap map[string]fruititem.FruitItem) []fruititem.FruitItem {
+	fruitItems := make([]fruititem.FruitItem, 0, len(fruitItemMap))
+	for _, item := range fruitItemMap {
 		fruitItems = append(fruitItems, item)
 	}
 	sort.SliceStable(fruitItems, func(i, j int) bool {

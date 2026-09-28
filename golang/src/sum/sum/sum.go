@@ -21,9 +21,9 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputQueue     middleware.Middleware
-	outputExchange middleware.Middleware
-	fruitItemMap   map[string]fruititem.FruitItem
+	inputQueue         middleware.Middleware
+	outputExchange     middleware.Middleware
+	fruitItemsByClient map[uint64]map[string]fruititem.FruitItem
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -46,9 +46,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 
 	return &Sum{
-		inputQueue:     inputQueue,
-		outputExchange: outputExchange,
-		fruitItemMap:   map[string]fruititem.FruitItem{},
+		inputQueue:         inputQueue,
+		outputExchange:     outputExchange,
+		fruitItemsByClient: map[uint64]map[string]fruititem.FruitItem{},
 	}, nil
 }
 
@@ -90,12 +90,17 @@ func (sum *Sum) handleMessage(msg middleware.Message) error {
 		return nil
 	}
 
-	return sum.handleDataMessage(message.Records)
+	return sum.handleDataMessage(message.ClientID, message.Records)
 }
 
+/*
+ * Envia los acumulados y el EOF del cliente 
+ * elimina su estado solo si todos los envios fueron correctos
+ */
 func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
-	for key := range sum.fruitItemMap {
-		fruitRecord := []fruititem.FruitItem{sum.fruitItemMap[key]}
+	fruitItemMap := sum.fruitItemsByClient[clientID]
+	for key := range fruitItemMap {
+		fruitRecord := []fruititem.FruitItem{fruitItemMap[key]}
 		message, err := inner.SerializeMessage(clientID, false, fruitRecord)
 		if err != nil {
 			return err
@@ -104,7 +109,7 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 			return fmt.Errorf("enviar acumulado: %w", err)
 		}
 	}
-	slog.Info("Acumulados enviados", "sum", "client_id", clientID, "records", len(sum.fruitItemMap))
+	slog.Info("Acumulados enviados", "sum", "client_id", clientID, "records", len(fruitItemMap))
 
 	eofMessage := []fruititem.FruitItem{}
 	message, err := inner.SerializeMessage(clientID, true, eofMessage)
@@ -114,17 +119,27 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 	if err := sum.outputExchange.Send(*message); err != nil {
 		return fmt.Errorf("enviar EOF: %w", err)
 	}
+	delete(sum.fruitItemsByClient, clientID)
 	slog.Info("EOF enviado", "sum", "client_id", clientID)
 	return nil
 }
 
-func (sum *Sum) handleDataMessage(fruitRecords []fruititem.FruitItem) error {
+/*
+ * Crea el acumulador del cliente si hace falta y combina sus registros llamando a Sum
+ */
+func (sum *Sum) handleDataMessage(clientID uint64, fruitRecords []fruititem.FruitItem) error {
+	fruitItemMap, ok := sum.fruitItemsByClient[clientID]
+	if !ok {
+		fruitItemMap = map[string]fruititem.FruitItem{}
+		sum.fruitItemsByClient[clientID] = fruitItemMap
+		slog.Info("Acumulador creado", "sum", "client_id", clientID)
+	}
 	for _, fruitRecord := range fruitRecords {
-		_, ok := sum.fruitItemMap[fruitRecord.Fruit]
+		_, ok := fruitItemMap[fruitRecord.Fruit]
 		if ok {
-			sum.fruitItemMap[fruitRecord.Fruit] = sum.fruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
+			fruitItemMap[fruitRecord.Fruit] = fruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
 		} else {
-			sum.fruitItemMap[fruitRecord.Fruit] = fruitRecord
+			fruitItemMap[fruitRecord.Fruit] = fruitRecord
 		}
 	}
 	return nil
