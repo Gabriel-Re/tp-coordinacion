@@ -52,58 +52,69 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}, nil
 }
 
+/*
+ * Consume y confirma mensajes procesados correctamente
+ * Se para el consumo en caso de encontrar errores
+ */
 func (sum *Sum) Run() {
-	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		sum.handleMessage(msg, ack, nack)
-	})
-}
-
-func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
-	defer ack()
-
-	fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
-	if err != nil {
-		slog.Error("While deserializing message", "err", err)
-		return
-	}
-
-	if isEof {
-		if err := sum.handleEndOfRecordMessage(); err != nil {
-			slog.Error("While handling end of record message", "err", err)
+	err := sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		if err := sum.handleMessage(msg); err != nil {
+			slog.Error("Error al procesar mensaje", "sum", "err", err)
+			// Ojo aca, que puedo duplicar datos enviados
+			if stopErr := sum.inputQueue.StopConsuming(); stopErr != nil {
+				slog.Error("Error al detener consumo", "sum", "err", stopErr)
+			}
+			return
 		}
-		return
-	}
-
-	if err := sum.handleDataMessage(fruitRecords); err != nil {
-		slog.Error("While handling data message", "err", err)
+		ack()
+	})
+	if err != nil {
+		slog.Error("Error de consumo", "sum", "err", err)
 	}
 }
 
-func (sum *Sum) handleEndOfRecordMessage() error {
-	slog.Info("Received End Of Records message")
+/*
+ * Procesa datos o EOF y pasa explicitamente el ID al emitir los acumulados
+ */
+func (sum *Sum) handleMessage(msg middleware.Message) error {
+	message, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		return err
+	}
+
+	if message.EOF {
+		slog.Info("EOF recibido", "sum", "client_id", message.ClientID)
+		if err := sum.handleEndOfRecordMessage(message.ClientID); err != nil {
+			return fmt.Errorf("procesar EOF del cliente %d: %w", message.ClientID, err)
+		}
+		return nil
+	}
+
+	return sum.handleDataMessage(message.Records)
+}
+
+func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 	for key := range sum.fruitItemMap {
 		fruitRecord := []fruititem.FruitItem{sum.fruitItemMap[key]}
-		message, err := inner.SerializeMessage(fruitRecord)
+		message, err := inner.SerializeMessage(clientID, false, fruitRecord)
 		if err != nil {
-			slog.Debug("While serializing message", "err", err)
 			return err
 		}
 		if err := sum.outputExchange.Send(*message); err != nil {
-			slog.Debug("While sending message", "err", err)
-			return err
+			return fmt.Errorf("enviar acumulado: %w", err)
 		}
 	}
+	slog.Info("Acumulados enviados", "sum", "client_id", clientID, "records", len(sum.fruitItemMap))
 
 	eofMessage := []fruititem.FruitItem{}
-	message, err := inner.SerializeMessage(eofMessage)
+	message, err := inner.SerializeMessage(clientID, true, eofMessage)
 	if err != nil {
-		slog.Debug("While serializing EOF message", "err", err)
 		return err
 	}
 	if err := sum.outputExchange.Send(*message); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
-		return err
+		return fmt.Errorf("enviar EOF: %w", err)
 	}
+	slog.Info("EOF enviado", "sum", "client_id", clientID)
 	return nil
 }
 

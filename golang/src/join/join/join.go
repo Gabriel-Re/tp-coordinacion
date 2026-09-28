@@ -1,8 +1,10 @@
 package join
 
 import (
+	"fmt"
 	"log/slog"
 
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
 
@@ -40,15 +42,42 @@ func NewJoin(config JoinConfig) (*Join, error) {
 	return &Join{inputQueue: inputQueue, outputQueue: outputQueue}, nil
 }
 
+/*
+ * Confirma resultados enviados y EOF consumidos 
+ * detiene el consumo en caso de errores
+ */
 func (join *Join) Run() {
-	join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		join.handleMessage(msg, ack, nack)
+	err := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		if err := join.handleMessage(msg); err != nil {
+			slog.Error("Error al procesar mensaje", "join", "err", err)
+			// No reintento, porque el resultado podria haber llegado al destino
+			if stopErr := join.inputQueue.StopConsuming(); stopErr != nil {
+				slog.Error("Error al detener consumo", "join", "err", stopErr)
+			}
+			return
+		}
+		ack()
 	})
+	if err != nil {
+		slog.Error("Error de consumo", "join", "err", err)
+	}
 }
 
-func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {
-	defer ack()
-	if err := join.outputQueue.Send(msg); err != nil {
-		slog.Error("While sending top", "err", err)
+/*
+ * Reenvia el resultado identificado, incluso vacio, y consume el EOF sin reenviarlo
+ */
+func (join *Join) handleMessage(msg middleware.Message) error {
+	message, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		return err
 	}
+	if message.EOF {
+		slog.Info("EOF recibido", "join", "client_id", message.ClientID)
+		return nil
+	}
+	if err := join.outputQueue.Send(msg); err != nil {
+		return fmt.Errorf("enviar resultado del cliente %d: %w", message.ClientID, err)
+	}
+	slog.Info("Resultado enviado", "join", "client_id", message.ClientID, "records", len(message.Records))
+	return nil
 }

@@ -52,55 +52,68 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	}, nil
 }
 
+/*
+ * Consume y confirma mensajes procesados correctamente 
+ * detiene el consumo en caso de error
+ */
 func (aggregation *Aggregation) Run() {
-	aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		aggregation.handleMessage(msg, ack, nack)
-	})
-}
-
-func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {
-	defer ack()
-
-	fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
-	if err != nil {
-		slog.Error("While deserializing message", "err", err)
-		return
-	}
-
-	if isEof {
-		if err := aggregation.handleEndOfRecordsMessage(); err != nil {
-			slog.Error("While handling end of record message", "err", err)
+	err := aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		if err := aggregation.handleMessage(msg); err != nil {
+			slog.Error("Error al procesar mensaje", "aggregation", "err", err)
+			// No reintento un envio parcial, podria duplicar data ya enviada
+			if stopErr := aggregation.inputExchange.StopConsuming(); stopErr != nil {
+				slog.Error("Error al detener consumo", "aggregation", "err", stopErr)
+			}
+			return
 		}
-		return
+		ack()
+	})
+	if err != nil {
+		slog.Error("Error de consumo", "aggregation", "err", err)
 	}
-
-	aggregation.handleDataMessage(fruitRecords)
 }
 
-func (aggregation *Aggregation) handleEndOfRecordsMessage() error {
-	slog.Info("Received End Of Records message")
-
-	fruitTopRecords := aggregation.buildFruitTop()
-	message, err := inner.SerializeMessage(fruitTopRecords)
+/*
+ * Procesa datos o EOF y conserva el ID al producir el resultado
+ */
+func (aggregation *Aggregation) handleMessage(msg middleware.Message) error {
+	message, err := inner.DeserializeMessage(&msg)
 	if err != nil {
-		slog.Debug("While serializing top message", "err", err)
+		return err
+	}
+
+	if message.EOF {
+		slog.Info("EOF recibido", "aggregation", "client_id", message.ClientID)
+		if err := aggregation.handleEndOfRecordsMessage(message.ClientID); err != nil {
+			return fmt.Errorf("procesar EOF del cliente %d: %w", message.ClientID, err)
+		}
+		return nil
+	}
+
+	aggregation.handleDataMessage(message.Records)
+	return nil
+}
+
+func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error {
+	fruitTopRecords := aggregation.buildFruitTop()
+	message, err := inner.SerializeMessage(clientID, false, fruitTopRecords)
+	if err != nil {
 		return err
 	}
 	if err := aggregation.outputQueue.Send(*message); err != nil {
-		slog.Debug("While sending top message", "err", err)
-		return err
+		return fmt.Errorf("enviar resultado: %w", err)
 	}
+	slog.Info("Resultado enviado", "aggregation", "client_id", clientID, "records", len(fruitTopRecords))
 
 	eofMessage := []fruititem.FruitItem{}
-	message, err = inner.SerializeMessage(eofMessage)
+	message, err = inner.SerializeMessage(clientID, true, eofMessage)
 	if err != nil {
-		slog.Debug("While serializing EOF message", "err", err)
 		return err
 	}
 	if err := aggregation.outputQueue.Send(*message); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
-		return err
+		return fmt.Errorf("enviar EOF: %w", err)
 	}
+	slog.Info("EOF enviado", "aggregation", "client_id", clientID)
 	return nil
 }
 
