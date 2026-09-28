@@ -20,7 +20,7 @@ type MessageHandler struct {
  */
 func NewMessageHandler() MessageHandler {
 	handler := MessageHandler{clientID: nextClientID.Add(1)}
-	slog.Info("Handler creado", "messagehandler", "client_id", handler.clientID)
+	slog.Info("messagehandler: Handler creado", "client_id", handler.clientID)
 	return handler
 }
 
@@ -34,7 +34,7 @@ func (messageHandler *MessageHandler) SerializeEOFMessage() (*middleware.Message
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("EOF preparado para envio", "messagehandler", "client_id", messageHandler.clientID)
+	slog.Info("messagehandler: EOF preparado para envio", "client_id", messageHandler.clientID)
 	return message, nil
 }
 

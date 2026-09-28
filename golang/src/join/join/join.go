@@ -72,12 +72,12 @@ func (join *Join) handleMessage(msg middleware.Message) error {
 		return err
 	}
 	if message.EOF {
-		slog.Info("EOF recibido", "join", "client_id", message.ClientID)
+		slog.Info("join: EOF recibido", "client_id", message.ClientID)
 		return nil
 	}
 	if err := join.outputQueue.Send(msg); err != nil {
 		return fmt.Errorf("enviar resultado del cliente %d: %w", message.ClientID, err)
 	}
-	slog.Info("Resultado enviado", "join", "client_id", message.ClientID, "records", len(message.Records))
+	slog.Info("join: Resultado enviado", "client_id", message.ClientID, "records", len(message.Records))
 	return nil
 }

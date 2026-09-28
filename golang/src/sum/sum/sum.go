@@ -83,7 +83,7 @@ func (sum *Sum) handleMessage(msg middleware.Message) error {
 	}
 
 	if message.EOF {
-		slog.Info("EOF recibido", "sum", "client_id", message.ClientID)
+		slog.Info("sum: EOF recibido", "client_id", message.ClientID)
 		if err := sum.handleEndOfRecordMessage(message.ClientID); err != nil {
 			return fmt.Errorf("procesar EOF del cliente %d: %w", message.ClientID, err)
 		}
@@ -109,7 +109,7 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 			return fmt.Errorf("enviar acumulado: %w", err)
 		}
 	}
-	slog.Info("Acumulados enviados", "sum", "client_id", clientID, "records", len(fruitItemMap))
+	slog.Info("sum: Acumulados enviados", "client_id", clientID, "records", len(fruitItemMap))
 
 	eofMessage := []fruititem.FruitItem{}
 	message, err := inner.SerializeMessage(clientID, true, eofMessage)
@@ -120,7 +120,7 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 		return fmt.Errorf("enviar EOF: %w", err)
 	}
 	delete(sum.fruitItemsByClient, clientID)
-	slog.Info("EOF enviado", "sum", "client_id", clientID)
+	slog.Info("sum: EOF enviado", "client_id", clientID)
 	return nil
 }
 
@@ -132,7 +132,7 @@ func (sum *Sum) handleDataMessage(clientID uint64, fruitRecords []fruititem.Frui
 	if !ok {
 		fruitItemMap = map[string]fruititem.FruitItem{}
 		sum.fruitItemsByClient[clientID] = fruitItemMap
-		slog.Info("Acumulador creado", "sum", "client_id", clientID)
+		slog.Info("sum: Acumulador creado", "client_id", clientID)
 	}
 	for _, fruitRecord := range fruitRecords {
 		_, ok := fruitItemMap[fruitRecord.Fruit]

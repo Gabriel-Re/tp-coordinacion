@@ -83,7 +83,7 @@ func (aggregation *Aggregation) handleMessage(msg middleware.Message) error {
 	}
 
 	if message.EOF {
-		slog.Info("EOF recibido", "aggregation", "client_id", message.ClientID)
+		slog.Info("aggregation: EOF recibido", "client_id", message.ClientID)
 		if err := aggregation.handleEndOfRecordsMessage(message.ClientID); err != nil {
 			return fmt.Errorf("procesar EOF del cliente %d: %w", message.ClientID, err)
 		}
@@ -118,7 +118,7 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error
 		return fmt.Errorf("enviar EOF: %w", err)
 	}
 	delete(aggregation.fruitItemsByClient, clientID)
-	slog.Info("EOF enviado", "aggregation", "client_id", clientID)
+	slog.Info("aggregation: EOF enviado", "client_id", clientID)
 	return nil
 }
 
@@ -130,7 +130,7 @@ func (aggregation *Aggregation) handleDataMessage(clientID uint64, fruitRecords 
 	if !ok {
 		fruitItemMap = map[string]fruititem.FruitItem{}
 		aggregation.fruitItemsByClient[clientID] = fruitItemMap
-		slog.Info("Acumulador creado", "aggregation", "client_id", clientID)
+		slog.Info("aggregation: Acumulador creado", "client_id", clientID)
 	}
 	for _, fruitRecord := range fruitRecords {
 		if _, ok := fruitItemMap[fruitRecord.Fruit]; ok {
