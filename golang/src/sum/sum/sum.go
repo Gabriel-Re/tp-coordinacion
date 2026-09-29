@@ -22,6 +22,7 @@ type SumConfig struct {
 }
 
 type Sum struct {
+	id                 int
 	inputQueue         middleware.Middleware
 	outputQueues       []middleware.Middleware
 	fruitItemsByClient map[uint64]map[string]fruititem.FruitItem
@@ -31,6 +32,12 @@ type Sum struct {
  * Prepara la entrada y las colas de salida antes de comenzar a consumir
  */
 func NewSum(config SumConfig) (*Sum, error) {
+	if config.SumAmount < 1 {
+		return nil, errors.New("la cantidad de instancias Sum debe ser mayor que cero")
+	}
+	if config.Id < 0 || config.Id >= config.SumAmount {
+		return nil, fmt.Errorf("el ID de Sum %d debe estar entre 0 y %d", config.Id, config.SumAmount-1)
+	}
 	if config.AggregationAmount < 1 {
 		return nil, errors.New("la cantidad de destinos debe ser mayor que cero")
 	}
@@ -42,6 +49,7 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 
 	sum := &Sum{
+		id:                 config.Id,
 		inputQueue:         inputQueue,
 		outputQueues:       make([]middleware.Middleware, 0, config.AggregationAmount),
 		fruitItemsByClient: map[uint64]map[string]fruititem.FruitItem{},
@@ -122,7 +130,7 @@ func (sum *Sum) handleMessage(msg middleware.Message) error {
 	}
 
 	if message.EOF {
-		slog.Info("sum: EOF recibido", "client_id", message.ClientID)
+		slog.Info("sum: EOF recibido", "client_id", message.ClientID, "sum_id", sum.id)
 		if err := sum.handleEndOfRecordMessage(message.ClientID); err != nil {
 			return fmt.Errorf("procesar EOF del cliente %d: %w", message.ClientID, err)
 		}
@@ -150,8 +158,7 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 	}
 	slog.Info("sum: Acumulados enviados", "client_id", clientID, "records", len(fruitItemMap))
 
-	eofMessage := []fruititem.FruitItem{}
-	message, err := inner.SerializeMessage(clientID, true, eofMessage)
+	message, err := inner.SerializeSumEOF(clientID, sum.id)
 	if err != nil {
 		return err
 	}
@@ -159,7 +166,7 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 		return fmt.Errorf("enviar EOF: %w", err)
 	}
 	delete(sum.fruitItemsByClient, clientID)
-	slog.Info("sum: EOF enviado", "client_id", clientID)
+	slog.Info("sum: EOF enviado", "client_id", clientID, "sum_id", sum.id)
 	return nil
 }
 

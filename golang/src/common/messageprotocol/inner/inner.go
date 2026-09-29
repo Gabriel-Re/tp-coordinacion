@@ -14,6 +14,7 @@ import (
 type Message struct {
 	ClientID uint64                `json:"client_id"`
 	EOF      bool                  `json:"eof"`
+	SumID    *int                  `json:"sum_id,omitempty"`
 	Records  []fruititem.FruitItem `json:"records"`
 }
 
@@ -26,6 +27,14 @@ func (message Message) validate() error {
 	}
 	if message.EOF && len(message.Records) != 0 {
 		return errors.New("un EOF no puede contener registros")
+	}
+	if message.SumID != nil {
+		if *message.SumID < 0 {
+			return errors.New("sum_id no puede ser negativo")
+		}
+		if !message.EOF {
+			return errors.New("sum_id solo puede aparecer en un EOF")
+		}
 	}
 	for i, record := range message.Records {
 		if record.Fruit == "" {
@@ -40,7 +49,20 @@ func (message Message) validate() error {
  * Serializa los registros con su cliente y un indicador de EOF
  */
 func SerializeMessage(clientID uint64, eof bool, records []fruititem.FruitItem) (*middleware.Message, error) {
-	message := Message{ClientID: clientID, EOF: eof, Records: records}
+	return serializeMessage(Message{ClientID: clientID, EOF: eof, Records: records})
+}
+
+/*
+ * Serializa un EOF con el cliente y la instancia Sum que lo envia
+ */
+func SerializeSumEOF(clientID uint64, sumID int) (*middleware.Message, error) {
+	return serializeMessage(Message{ClientID: clientID, EOF: true, SumID: &sumID})
+}
+
+/*
+ * Valida y serializa el mensaje 
+ */
+func serializeMessage(message Message) (*middleware.Message, error) {
 	if err := message.validate(); err != nil {
 		return nil, fmt.Errorf("serializar mensaje interno: %w", err)
 	}
@@ -65,6 +87,7 @@ func DeserializeMessage(message *middleware.Message) (Message, error) {
 	var data struct {
 		ClientID *uint64 `json:"client_id"`
 		EOF      *bool   `json:"eof"`
+		SumID    *int    `json:"sum_id,omitempty"`
 		Records  *[]struct {
 			Fruit  *string
 			Amount *uint32
@@ -84,7 +107,7 @@ func DeserializeMessage(message *middleware.Message) (Message, error) {
 	if data.ClientID == nil || data.EOF == nil || data.Records == nil {
 		return Message{}, errors.New("deserializar mensaje interno: client_id, eof y records son obligatorios y no pueden ser null")
 	}
-	decoded := Message{ClientID: *data.ClientID, EOF: *data.EOF, Records: make([]fruititem.FruitItem, len(*data.Records))}
+	decoded := Message{ClientID: *data.ClientID, EOF: *data.EOF, SumID: data.SumID, Records: make([]fruititem.FruitItem, len(*data.Records))}
 	for i, record := range *data.Records {
 		if record.Fruit == nil || record.Amount == nil {
 			return Message{}, fmt.Errorf("deserializar mensaje interno: registro %d: Fruit y Amount son obligatorios y no pueden ser null", i)
