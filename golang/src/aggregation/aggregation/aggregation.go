@@ -24,16 +24,21 @@ type AggregationConfig struct {
 }
 
 type Aggregation struct {
-	outputQueue        middleware.Middleware
-	inputQueue         middleware.Middleware
-	fruitItemsByClient map[uint64]map[string]fruititem.FruitItem
-	topSize            int
+	outputQueue          middleware.Middleware
+	inputQueue           middleware.Middleware
+	fruitItemsByClient   map[uint64]map[string]fruititem.FruitItem
+	finishedSumsByClient map[uint64]map[int]struct{}
+	sumAmount            int
+	topSize              int
 }
 
 /*
  * Prepara la cola de entrada compartida con Sum y la cola de resultados
  */
 func NewAggregation(config AggregationConfig) (*Aggregation, error) {
+	if config.SumAmount < 1 {
+		return nil, errors.New("la cantidad de instancias Sum debe ser mayor que cero")
+	}
 	connSettings := middleware.ConnSettings{Hostname: config.MomHost, Port: config.MomPort}
 
 	outputQueue, err := middleware.CreateQueueMiddleware(config.OutputQueue, connSettings)
@@ -49,10 +54,12 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	slog.Info("aggregation: Cola de entrada lista", "queue", queueName)
 
 	return &Aggregation{
-		outputQueue:        outputQueue,
-		inputQueue:         inputQueue,
-		fruitItemsByClient: map[uint64]map[string]fruititem.FruitItem{},
-		topSize:            config.TopSize,
+		outputQueue:          outputQueue,
+		inputQueue:           inputQueue,
+		fruitItemsByClient:   map[uint64]map[string]fruititem.FruitItem{},
+		finishedSumsByClient: map[uint64]map[int]struct{}{},
+		sumAmount:            config.SumAmount,
+		topSize:              config.TopSize,
 	}, nil
 }
 
@@ -84,7 +91,7 @@ func (aggregation *Aggregation) Run() (err error) {
 }
 
 /*
- * Procesa datos o EOF y conserva el ID al producir el resultado
+ * Procesa datos o EOF y valida la instancia Sum antes de registrar su finalizacion
  */
 func (aggregation *Aggregation) handleMessage(msg middleware.Message) error {
 	message, err := inner.DeserializeMessage(&msg)
@@ -93,9 +100,15 @@ func (aggregation *Aggregation) handleMessage(msg middleware.Message) error {
 	}
 
 	if message.EOF {
-		slog.Info("aggregation: EOF recibido", "client_id", message.ClientID)
-		if err := aggregation.handleEndOfRecordsMessage(message.ClientID); err != nil {
-			return fmt.Errorf("procesar EOF del cliente %d: %w", message.ClientID, err)
+		if message.SumID == nil {
+			return fmt.Errorf("procesar EOF del cliente %d: falta sum_id", message.ClientID)
+		}
+		sumID := *message.SumID
+		if sumID < 0 || sumID >= aggregation.sumAmount {
+			return fmt.Errorf("procesar EOF del cliente %d: sum_id %d fuera de rango [0, %d)", message.ClientID, sumID, aggregation.sumAmount)
+		}
+		if err := aggregation.handleEndOfRecordsMessage(message.ClientID, sumID); err != nil {
+			return fmt.Errorf("procesar EOF del cliente %d de Sum %d: %w", message.ClientID, sumID, err)
 		}
 		return nil
 	}
@@ -105,10 +118,24 @@ func (aggregation *Aggregation) handleMessage(msg middleware.Message) error {
 }
 
 /*
- * Envia el top y el EOF del cliente  
- * elimina su estado solo si ambos envios son correctos
+ * Registra cada Sum una vez por cliente y envia el top y el EOF cuando terminaron todos
+ * Elimina ambos estados del cliente solo si los dos envios son correctos
  */
-func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error {
+func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64, sumID int) error {
+	finishedSums, ok := aggregation.finishedSumsByClient[clientID]
+	if !ok {
+		finishedSums = map[int]struct{}{}
+		aggregation.finishedSumsByClient[clientID] = finishedSums
+	}
+	if _, ok := finishedSums[sumID]; ok {
+		return nil
+	}
+	finishedSums[sumID] = struct{}{}
+	slog.Info("aggregation: EOF registrado", "client_id", clientID, "sum_id", sumID, "received", len(finishedSums), "expected", aggregation.sumAmount)
+	if len(finishedSums) < aggregation.sumAmount {
+		return nil
+	}
+
 	fruitTopRecords := aggregation.buildFruitTop(aggregation.fruitItemsByClient[clientID])
 	message, err := inner.SerializeMessage(clientID, false, fruitTopRecords)
 	if err != nil {
@@ -128,6 +155,7 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID uint64) error
 		return fmt.Errorf("enviar EOF: %w", err)
 	}
 	delete(aggregation.fruitItemsByClient, clientID)
+	delete(aggregation.finishedSumsByClient, clientID)
 	slog.Info("aggregation: EOF enviado", "client_id", clientID)
 	return nil
 }
