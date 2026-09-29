@@ -2,14 +2,16 @@ Redactar un breve informe en el archivo `INFORME.md` explicando el modo en que s
 
 # Informe Gabriel Re (105095)
 
-Los clientes se distinguen mediante `ClientID` y sus acumuladores separados.
-Sum y Aggregation mantienen un mapa por cliente, por lo que terminar uno no elimina los datos de los demás.
+Los clientes se distinguen mediante `ClientID`, que acompaña los mensajes hasta que el gateway entrega el resultado correspondiente. Sum y Aggregation mantienen acumuladores separados por cliente, permitiendo procesar mensajes intercalados sin mezclar sus datos.
 
-## Comunicación entre Sum y Aggregation
+## Distribución de datos
 
-Ahora ambos procesos declaran la misma cola nombrada. Sum la prepara antes de publicar y Aggregation antes de consumir. Si Sum arranca primero, los mensajes esperan en esa cola. Si Aggregation arranca primero, espera allí los mensajes.
+Sum consume la entrada del gateway y reparte los mensajes completos por turnos entre las colas de trabajo, una por Sum y no por cliente. También realiza cálculos desde su propia cola, con un consumidor separado del distribuidor.
 
-Sum guarda sus destinos en el slice `outputQueues`, con una cola por Aggregation configurada y no por cliente. Con una sola Aggregation hay un único elemento. Por ahora cada mensaje se envía a todos los destinos.
+El EOF de cada cliente se envía a todos los Sum usando los mismos publicadores que sus datos. Como los envíos son secuenciales, cada trabajador recibe el EOF después de los registros que le fueron asignados. El distribuidor confirma la entrada al completar los envíos y continúa sin esperar los resultados.
 
-Para cada cliente, Sum envía los acumulados y luego su EOF. Aggregation envía el top y después su EOF.
+## Acumulación y resultados
 
+Sum y Aggregation declaran la misma cola de comunicación, donde los mensajes esperan hasta ser consumidos. Cada Sum envía sus acumulados y luego un EOF con su `SumID`, incluso si no recibió datos del cliente. Aggregation espera los EOF de todas las instancias antes de calcular el top, sin volver a contar IDs repetidos mientras el cliente está pendiente.
+
+Aggregation envía el top y después su EOF. Join reenvía el resultado identificado al gateway y consume el EOF sin reenviarlo. El indicador explícito de EOF permite diferenciar que haya terminado de un resultado vacío. Los estados se eliminan después de completar los envíos exitosamente.

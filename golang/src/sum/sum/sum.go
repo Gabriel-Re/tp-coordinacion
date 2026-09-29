@@ -24,12 +24,14 @@ type SumConfig struct {
 type Sum struct {
 	id                 int
 	inputQueue         middleware.Middleware
+	dispatchQueue      middleware.Middleware
+	sumQueues          []middleware.Middleware
 	outputQueues       []middleware.Middleware
 	fruitItemsByClient map[uint64]map[string]fruititem.FruitItem
 }
 
 /*
- * Prepara la entrada y las colas de salida antes de comenzar a consumir
+ * Prepara la cola de trabajo, las salidas y la distribucion de Sum 0 antes de consumir
  */
 func NewSum(config SumConfig) (*Sum, error) {
 	if config.SumAmount < 1 {
@@ -43,7 +45,8 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 	connSettings := middleware.ConnSettings{Hostname: config.MomHost, Port: config.MomPort}
 
-	inputQueue, err := middleware.CreateQueueMiddleware(config.InputQueue, connSettings)
+	queueName := fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)
+	inputQueue, err := middleware.CreateQueueMiddleware(queueName, connSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +57,7 @@ func NewSum(config SumConfig) (*Sum, error) {
 		outputQueues:       make([]middleware.Middleware, 0, config.AggregationAmount),
 		fruitItemsByClient: map[uint64]map[string]fruititem.FruitItem{},
 	}
+	slog.Info("sum: Cola de trabajo preparada", "sum_id", sum.id, "queue", queueName)
 	for i := range config.AggregationAmount {
 		queueName := fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
 		outputQueue, err := middleware.CreateQueueMiddleware(queueName, connSettings)
@@ -63,27 +67,54 @@ func NewSum(config SumConfig) (*Sum, error) {
 		sum.outputQueues = append(sum.outputQueues, outputQueue)
 		slog.Info("sum: Cola de salida preparada", "queue", queueName)
 	}
+	if sum.id == dispatcherID {
+		if err := sum.prepareDispatcher(config, connSettings); err != nil {
+			return nil, errors.Join(err, sum.close())
+		}
+	}
 
 	return sum, nil
 }
 
 /*
- * Confirma mensajes procesados correctamente y devuelve los errores de procesamiento, consumo y cierre.
+ * Ejecuta el trabajador y, en Sum 0, el distribuidor hasta que termine alguno
+ * Cierra las entradas y espera ambos consumidores antes de cerrar los publicadores
  */
 func (sum *Sum) Run() (err error) {
 	defer func() {
 		err = errors.Join(err, sum.close())
 	}()
 
+	if sum.dispatchQueue == nil {
+		return consumeMessages(sum.inputQueue, sum.handleMessage)
+	}
+
+	results := make(chan error, 2)
+	go func() {
+		results <- consumeMessages(sum.inputQueue, sum.handleMessage)
+	}()
+	go func() {
+		results <- sum.runDispatcher()
+	}()
+
+	err = <-results
+	err = errors.Join(err, sum.closeInputs())
+	return errors.Join(err, <-results)
+}
+
+/*
+ * Confirma cada mensaje solo despues del procesamiento exitoso y cierra su entrada ante errores
+ */
+func consumeMessages(inputQueue middleware.Middleware, handleMessage func(middleware.Message) error) error {
 	var processingErr error
-	consumeErr := sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	consumeErr := inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		if processingErr != nil {
 			return
 		}
-		if err := sum.handleMessage(msg); err != nil {
+		if err := handleMessage(msg); err != nil {
 			processingErr = err
-			// Cerrar libera la entrega sin ACK, pero una reentrega puede duplicar envios parciales.
-			if closeErr := sum.inputQueue.Close(); closeErr != nil {
+			// Cerrar libera la entrega sin ACK, pero una reentrega puede duplicar envios parciales
+			if closeErr := inputQueue.Close(); closeErr != nil {
 				processingErr = errors.Join(processingErr, fmt.Errorf("cerrar entrada tras error: %w", closeErr))
 			}
 			return
@@ -94,15 +125,33 @@ func (sum *Sum) Run() (err error) {
 }
 
 /*
- * Cierra todos los recursos
+ * Cierra las entradas para impedir nuevos consumos y desbloquear los que ya comenzaron
+ */
+func (sum *Sum) closeInputs() (err error) {
+	if closeErr := sum.inputQueue.Close(); closeErr != nil {
+		err = fmt.Errorf("cerrar cola de trabajo: %w", closeErr)
+	}
+	if sum.dispatchQueue != nil {
+		if closeErr := sum.dispatchQueue.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("cerrar entrada del distribuidor: %w", closeErr))
+		}
+	}
+	return err
+}
+
+/*
+ * Cierra las entradas y los publicadores adquiridos, teniendo todos los errores de cierre
  */
 func (sum *Sum) close() (err error) {
-	if closeErr := sum.inputQueue.Close(); closeErr != nil {
-		err = fmt.Errorf("cerrar cola de entrada: %w", closeErr)
-	}
+	err = sum.closeInputs()
 	for i, outputQueue := range sum.outputQueues {
 		if closeErr := outputQueue.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("cerrar cola de salida %d: %w", i, closeErr))
+		}
+	}
+	for i, sumQueue := range sum.sumQueues {
+		if closeErr := sumQueue.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("cerrar destino Sum %d: %w", i, closeErr))
 		}
 	}
 	return err
@@ -156,7 +205,7 @@ func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 			return fmt.Errorf("enviar acumulado: %w", err)
 		}
 	}
-	slog.Info("sum: Acumulados enviados", "client_id", clientID, "records", len(fruitItemMap))
+	slog.Info("sum: Acumulados enviados", "client_id", clientID, "sum_id", sum.id, "records", len(fruitItemMap))
 
 	message, err := inner.SerializeSumEOF(clientID, sum.id)
 	if err != nil {
