@@ -12,14 +12,15 @@ import (
 )
 
 type Message struct {
-	ClientID uint64                `json:"client_id"`
-	EOF      bool                  `json:"eof"`
-	SumID    *int                  `json:"sum_id,omitempty"`
-	Records  []fruititem.FruitItem `json:"records"`
+	ClientID      uint64                `json:"client_id"`
+	EOF           bool                  `json:"eof"`
+	SumID         *int                  `json:"sum_id,omitempty"`
+	AggregationID *int                  `json:"aggregation_id,omitempty"`
+	Records       []fruititem.FruitItem `json:"records"`
 }
 
 /*
- * Valida el contenido del mensaje
+ * Valida el contenido y que un EOF identifique como maximo una etapa
  */
 func (message Message) validate() error {
 	if message.ClientID == 0 {
@@ -34,6 +35,17 @@ func (message Message) validate() error {
 		}
 		if !message.EOF {
 			return errors.New("sum_id solo puede aparecer en un EOF")
+		}
+	}
+	if message.AggregationID != nil {
+		if *message.AggregationID < 0 {
+			return errors.New("aggregation_id no puede ser negativo")
+		}
+		if !message.EOF {
+			return errors.New("aggregation_id solo puede aparecer en un EOF")
+		}
+		if message.SumID != nil {
+			return errors.New("un mensaje no puede incluir sum_id y aggregation_id a la vez")
 		}
 	}
 	for i, record := range message.Records {
@@ -60,7 +72,14 @@ func SerializeSumEOF(clientID uint64, sumID int) (*middleware.Message, error) {
 }
 
 /*
- * Valida y serializa el mensaje 
+ * Serializa un EOF con el cliente y el Aggregation que lo envia
+ */
+func SerializeAggregationEOF(clientID uint64, aggregationID int) (*middleware.Message, error) {
+	return serializeMessage(Message{ClientID: clientID, EOF: true, AggregationID: &aggregationID})
+}
+
+/*
+ * Valida y serializa el mensaje
  */
 func serializeMessage(message Message) (*middleware.Message, error) {
 	if err := message.validate(); err != nil {
@@ -85,10 +104,11 @@ func DeserializeMessage(message *middleware.Message) (Message, error) {
 		return Message{}, errors.New("deserializar mensaje interno: mensaje nil")
 	}
 	var data struct {
-		ClientID *uint64 `json:"client_id"`
-		EOF      *bool   `json:"eof"`
-		SumID    *int    `json:"sum_id,omitempty"`
-		Records  *[]struct {
+		ClientID      *uint64 `json:"client_id"`
+		EOF           *bool   `json:"eof"`
+		SumID         *int    `json:"sum_id,omitempty"`
+		AggregationID *int    `json:"aggregation_id,omitempty"`
+		Records       *[]struct {
 			Fruit  *string
 			Amount *uint32
 		} `json:"records"`
@@ -107,7 +127,7 @@ func DeserializeMessage(message *middleware.Message) (Message, error) {
 	if data.ClientID == nil || data.EOF == nil || data.Records == nil {
 		return Message{}, errors.New("deserializar mensaje interno: client_id, eof y records son obligatorios y no pueden ser null")
 	}
-	decoded := Message{ClientID: *data.ClientID, EOF: *data.EOF, SumID: data.SumID, Records: make([]fruititem.FruitItem, len(*data.Records))}
+	decoded := Message{ClientID: *data.ClientID, EOF: *data.EOF, SumID: data.SumID, AggregationID: data.AggregationID, Records: make([]fruititem.FruitItem, len(*data.Records))}
 	for i, record := range *data.Records {
 		if record.Fruit == nil || record.Amount == nil {
 			return Message{}, fmt.Errorf("deserializar mensaje interno: registro %d: Fruit y Amount son obligatorios y no pueden ser null", i)

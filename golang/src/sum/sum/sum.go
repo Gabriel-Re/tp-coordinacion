@@ -3,6 +3,7 @@ package sum
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"log/slog"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
@@ -190,19 +191,28 @@ func (sum *Sum) handleMessage(msg middleware.Message) error {
 }
 
 /*
- * Envia los acumulados y el EOF del cliente
+ * Calcula el destino de una fruta con un hash estable y la cantidad de Aggregations.
+ */
+func (sum *Sum) aggregationIndex(fruit string) int {
+	checksum := crc32.ChecksumIEEE([]byte(fruit))
+	return int(uint64(checksum) % uint64(len(sum.outputQueues)))
+}
+
+/*
+ * Envia cada acumulado al destino de su fruta y luego el EOF a todos los destinos
  * elimina su estado solo si todos los envios fueron correctos
  */
 func (sum *Sum) handleEndOfRecordMessage(clientID uint64) error {
 	fruitItemMap := sum.fruitItemsByClient[clientID]
 	for key := range fruitItemMap {
 		fruitRecord := []fruititem.FruitItem{fruitItemMap[key]}
+		destination := sum.aggregationIndex(fruitRecord[0].Fruit)
 		message, err := inner.SerializeMessage(clientID, false, fruitRecord)
 		if err != nil {
 			return err
 		}
-		if err := sum.sendToOutputs(*message); err != nil {
-			return fmt.Errorf("enviar acumulado: %w", err)
+		if err := sum.outputQueues[destination].Send(*message); err != nil {
+			return fmt.Errorf("enviar acumulado del cliente %d a Aggregation %d: %w", clientID, destination, err)
 		}
 	}
 	slog.Info("sum: Acumulados enviados", "client_id", clientID, "sum_id", sum.id, "records", len(fruitItemMap))
