@@ -71,17 +71,20 @@ func loadConfig() (join.JoinConfig, error) {
 func run() int {
 	config, err := loadConfig()
 	if err != nil {
-		slog.Error("While loading config", "err", err)
+		slog.Error("join: Error al cargar configuracion", "err", err)
 		return 1
 	}
 
 	server, err := join.NewJoin(config)
 	if err != nil {
-		slog.Error("While initializing join", "err", err)
+		slog.Error("join: Error al inicializar", "err", err)
 		return 1
 	}
 
-	server.Run()
+	if err := server.Run(); err != nil {
+		slog.Error("join: Error de ejecucion", "err", err)
+		return 1
+	}
 	return 0
 }
 

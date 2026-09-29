@@ -1,6 +1,7 @@
 package aggregation
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -24,11 +25,14 @@ type AggregationConfig struct {
 
 type Aggregation struct {
 	outputQueue        middleware.Middleware
-	inputExchange      middleware.Middleware
+	inputQueue         middleware.Middleware
 	fruitItemsByClient map[uint64]map[string]fruititem.FruitItem
 	topSize            int
 }
 
+/*
+ * Prepara la cola de entrada compartida con Sum y la cola de resultados
+ */
 func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	connSettings := middleware.ConnSettings{Hostname: config.MomHost, Port: config.MomPort}
 
@@ -37,40 +41,46 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 		return nil, err
 	}
 
-	inputExchangeRoutingKey := []string{fmt.Sprintf("%s_%d", config.AggregationPrefix, config.Id)}
-	inputExchange, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, inputExchangeRoutingKey, connSettings)
+	queueName := fmt.Sprintf("%s_%d", config.AggregationPrefix, config.Id)
+	inputQueue, err := middleware.CreateQueueMiddleware(queueName, connSettings)
 	if err != nil {
-		outputQueue.Close()
-		return nil, err
+		return nil, errors.Join(fmt.Errorf("iniciando cola de entrada %q: %w", queueName, err), outputQueue.Close())
 	}
+	slog.Info("aggregation: Cola de entrada lista", "queue", queueName)
 
 	return &Aggregation{
 		outputQueue:        outputQueue,
-		inputExchange:      inputExchange,
+		inputQueue:         inputQueue,
 		fruitItemsByClient: map[uint64]map[string]fruititem.FruitItem{},
 		topSize:            config.TopSize,
 	}, nil
 }
 
 /*
- * Consume y confirma mensajes procesados correctamente 
- * detiene el consumo en caso de error
+ * Confirma mensajes procesados correctamente 
  */
-func (aggregation *Aggregation) Run() {
-	err := aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+func (aggregation *Aggregation) Run() (err error) {
+	// retorno los distintos errores
+	defer func() {
+		err = errors.Join(err, aggregation.inputQueue.Close(), aggregation.outputQueue.Close())
+	}()
+
+	var processingErr error
+	consumeErr := aggregation.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		if processingErr != nil {
+			return
+		}
 		if err := aggregation.handleMessage(msg); err != nil {
-			slog.Error("Error al procesar mensaje", "aggregation", "err", err)
+			processingErr = err
 			// No reintento un envio parcial, podria duplicar data ya enviada
-			if stopErr := aggregation.inputExchange.StopConsuming(); stopErr != nil {
-				slog.Error("Error al detener consumo", "aggregation", "err", stopErr)
+			if closeErr := aggregation.inputQueue.Close(); closeErr != nil {
+				processingErr = errors.Join(processingErr, fmt.Errorf("cerrar entrada por error: %w", closeErr))
 			}
 			return
 		}
 		ack()
 	})
-	if err != nil {
-		slog.Error("Error de consumo", "aggregation", "err", err)
-	}
+	return errors.Join(processingErr, consumeErr)
 }
 
 /*

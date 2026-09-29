@@ -65,17 +65,20 @@ func loadConfig() (sum.SumConfig, error) {
 func run() int {
 	config, err := loadConfig()
 	if err != nil {
-		slog.Error("While loading config", "err", err)
+		slog.Error("sum: Error al cargar configuracion", "err", err)
 		return 1
 	}
 
 	server, err := sum.NewSum(config)
 	if err != nil {
-		slog.Error("While initializing sum", "err", err)
+		slog.Error("sum: Error al inicializar", "err", err)
 		return 1
 	}
 
-	server.Run()
+	if err := server.Run(); err != nil {
+		slog.Error("sum: Error de ejecucion", "err", err)
+		return 1
+	}
 	return 0
 }
 

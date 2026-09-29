@@ -1,6 +1,7 @@
 package join
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -35,32 +36,36 @@ func NewJoin(config JoinConfig) (*Join, error) {
 
 	outputQueue, err := middleware.CreateQueueMiddleware(config.OutputQueue, connSettings)
 	if err != nil {
-		inputQueue.Close()
-		return nil, err
+		return nil, errors.Join(err, inputQueue.Close())
 	}
 
 	return &Join{inputQueue: inputQueue, outputQueue: outputQueue}, nil
 }
 
 /*
- * Confirma resultados enviados y EOF consumidos 
- * detiene el consumo en caso de errores
+ * Confirma resultados enviados y EOF consumidos y devuelve los errores junto con los de cierre.
  */
-func (join *Join) Run() {
-	err := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+func (join *Join) Run() (err error) {
+	defer func() {
+		err = errors.Join(err, join.inputQueue.Close(), join.outputQueue.Close())
+	}()
+
+	var processingErr error
+	consumeErr := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		if processingErr != nil {
+			return
+		}
 		if err := join.handleMessage(msg); err != nil {
-			slog.Error("Error al procesar mensaje", "join", "err", err)
-			// No reintento, porque el resultado podria haber llegado al destino
-			if stopErr := join.inputQueue.StopConsuming(); stopErr != nil {
-				slog.Error("Error al detener consumo", "join", "err", stopErr)
+			processingErr = err
+			// Cerrar libera la entrega sin ACK, pero una reentrega puede duplicar el resultado.
+			if closeErr := join.inputQueue.Close(); closeErr != nil {
+				processingErr = errors.Join(processingErr, fmt.Errorf("cerrar entrada tras error: %w", closeErr))
 			}
 			return
 		}
 		ack()
 	})
-	if err != nil {
-		slog.Error("Error de consumo", "join", "err", err)
-	}
+	return errors.Join(processingErr, consumeErr)
 }
 
 /*
