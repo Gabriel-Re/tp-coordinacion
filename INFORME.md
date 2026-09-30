@@ -2,16 +2,21 @@ Redactar un breve informe en el archivo `INFORME.md` explicando el modo en que s
 
 # Informe Gabriel Re (105095)
 
-Los clientes se distinguen mediante `ClientID`, que acompaña los mensajes hasta que el gateway entrega el resultado correspondiente. Sum y Aggregation mantienen acumuladores separados por cliente, permitiendo procesar mensajes intercalados sin mezclar sus datos.
+Los clientes se distinguen mediante `ClientID`, que acompaña los mensajes hasta que el gateway entrega el resultado correspondiente. Sum y Aggregation mantienen acumuladores separados por cliente, y Join conserva sus candidatos y finalizaciones de la misma manera. Así pueden procesar mensajes intercalados sin mezclar sus datos.
 
 ## Distribución de datos
 
-Sum consume la entrada del gateway y reparte los mensajes completos por turnos entre las colas de trabajo, una por Sum y no por cliente. También realiza cálculos desde su propia cola, con un consumidor separado del distribuidor.
+Sum 0 consume la entrada del gateway y reparte los mensajes completos por turnos entre las colas de trabajo, una por Sum y no por cliente. También realiza cálculos desde su propia cola, con un consumidor separado del distribuidor.
 
 El EOF de cada cliente se envía a todos los Sum usando los mismos publicadores que sus datos. Como los envíos son secuenciales, cada trabajador recibe el EOF después de los registros que le fueron asignados. El distribuidor confirma la entrada al completar los envíos y continúa sin esperar los resultados.
 
 ## Acumulación y resultados
 
-Sum y Aggregation declaran la misma cola de comunicación, donde los mensajes esperan hasta ser consumidos. Cada Sum envía sus acumulados y luego un EOF con su `SumID`, incluso si no recibió datos del cliente. Aggregation espera los EOF de todas las instancias antes de calcular el top, sin volver a contar IDs repetidos mientras el cliente está pendiente.
+Cada Sum elige el destino de sus acumulados aplicando hash al nombre de la fruta y usando el módulo por la cantidad de Aggregations. Todas las apariciones de una misma fruta llegan a la misma réplica.
 
-Aggregation envía el top y después su EOF. Join reenvía el resultado identificado al gateway y consume el EOF sin reenviarlo. El indicador explícito de EOF permite diferenciar que haya terminado de un resultado vacío. Los estados se eliminan después de completar los envíos exitosamente.
+Después de enviar los acumulados, cada Sum envía su EOF con `SumID` a todas las Aggregations, incluso a las que no recibieron frutas de ese cliente.
+
+Cada Aggregation espera los EOF de todos los Sum para enviar su top parcial y después un EOF con su `AggregationID`. Join combina cada top parcial con los candidatos del cliente, los ordena y conserva como máximo `TopSize` elementos. No vuelve a sumar cantidades porque cada fruta ya fue consolidada en una única Aggregation.
+
+Join registra los EOF distintos por cliente y espera a todas las Aggregations antes de enviar un único top global al gateway. Los EOF parciales se confirman para seguir consumiendo. 
+Si todos los tops estaban vacíos, se envía igualmente una lista vacía.
