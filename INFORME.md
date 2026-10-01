@@ -20,3 +20,9 @@ Cada Aggregation espera los EOF de todos los Sum para enviar su top parcial y de
 
 Join registra los EOF distintos por cliente y espera a todas las Aggregations antes de enviar un único top global al gateway. Los EOF parciales se confirman para seguir consumiendo. 
 Si todos los tops estaban vacíos, se envía igualmente una lista vacía.
+
+## Escalabilidad y concurrencia
+
+Los registros se procesan a medida que llegan y se conservan acumulados por fruta, en lugar de guardar todos los registros recibidos. La memoria utilizada no es constante, ya que depende de los clientes activos y de la cantidad de frutas distintas de cada uno. Atender más clientes al mismo tiempo aumenta ese estado. Cada etapa elimina los datos del cliente cuando termina correctamente su procesamiento y completa los envíos correspondientes, sin afectar a los demás.
+
+Las réplicas de Sum reparten el procesamiento de los mensajes, mientras que las de Aggregation reparten el trabajo por fruta y mantienen juntos sus acumulados. Join conserva únicamente los candidatos necesarios para el top de cada cliente. Agregar réplicas permite repartir trabajo, pero no garantiza una mejora proporcional del rendimiento. El distribuidor de Sum 0 y Join siguen siendo puntos centralizados.
