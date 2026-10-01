@@ -1,6 +1,7 @@
 package sum
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -81,34 +82,37 @@ func NewSum(config SumConfig) (*Sum, error) {
  * Ejecuta el trabajador y, en Sum 0, el distribuidor hasta que termine alguno
  * Cierra las entradas y espera ambos consumidores antes de cerrar los publicadores
  */
-func (sum *Sum) Run() (err error) {
+func (sum *Sum) Run(ctx context.Context) (err error) {
 	defer func() {
+		slog.Info("sum: Consumidores finalizados", "sum_id", sum.id)
 		err = errors.Join(err, sum.close())
 	}()
 
 	if sum.dispatchQueue == nil {
-		return consumeMessages(sum.inputQueue, sum.handleMessage)
+		return consumeMessages(ctx, sum.inputQueue, sum.handleMessage)
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	results := make(chan error, 2)
 	go func() {
-		results <- consumeMessages(sum.inputQueue, sum.handleMessage)
+		results <- consumeMessages(ctx, sum.inputQueue, sum.handleMessage)
 	}()
 	go func() {
-		results <- sum.runDispatcher()
+		results <- sum.runDispatcher(ctx)
 	}()
 
 	err = <-results
-	err = errors.Join(err, sum.closeInputs())
+	cancel()
 	return errors.Join(err, <-results)
 }
 
 /*
  * Confirma cada mensaje solo despues del procesamiento exitoso y cierra su entrada ante errores
  */
-func consumeMessages(inputQueue middleware.Middleware, handleMessage func(middleware.Message) error) error {
+func consumeMessages(ctx context.Context, inputQueue middleware.Middleware, handleMessage func(middleware.Message) error) error {
 	var processingErr error
-	consumeErr := inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	consumeErr := middleware.StartConsumingContext(ctx, inputQueue, func(msg middleware.Message, ack, nack func()) {
 		if processingErr != nil {
 			return
 		}

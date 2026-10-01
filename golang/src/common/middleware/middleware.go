@@ -1,6 +1,13 @@
 package middleware
 
-import "errors"
+import (
+	"errors"
+	"context"
+	"log/slog"
+	"time"
+)
+
+const consumerStopCheckInterval = 10 * time.Millisecond
 
 var (
 	ErrMessageMiddlewareMessage      = errors.New("message middleware: message error")
@@ -42,4 +49,35 @@ type Middleware interface {
 	//Se desconecta de la cola o exchange al que estaba conectado.
 	//Si ocurre un error interno que no puede resolverse devuelve ErrMessageMiddlewareClose.
 	Close() error
+}
+
+/*
+ * Cancela el consumo con el contexto y espera las entregas en transito antes de retornar
+ */
+func StartConsumingContext(ctx context.Context, input Middleware, callback func(Message, func(), func())) error {
+	finished := make(chan error, 1)
+	go func() {
+		finished <- input.StartConsuming(callback)
+	}()
+	select {
+	case err := <-finished:
+		return err
+	case <-ctx.Done():
+	}
+
+	slog.Info("middleware: Apagado solicitado")
+	ticker := time.NewTicker(consumerStopCheckInterval)
+	defer ticker.Stop()
+	for {
+		// Repito porque StopConsuming, si no esta consumiendo, no devuelve error y no cierra el canal finished
+		if err := input.StopConsuming(); err != nil {
+			closeErr := input.Close()
+			return errors.Join(err, closeErr, <-finished)
+		}
+		select {
+		case err := <-finished:
+			return err
+		case <-ticker.C:
+		}
+	}
 }

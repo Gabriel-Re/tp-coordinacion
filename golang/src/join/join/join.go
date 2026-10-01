@@ -1,6 +1,7 @@
 package join
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,13 +68,14 @@ func NewJoin(config JoinConfig) (*Join, error) {
 /*
  * Confirma resultados enviados y EOF consumidos y devuelve los errores junto con los de cierre.
  */
-func (join *Join) Run() (err error) {
+func (join *Join) Run(ctx context.Context) (err error) {
 	defer func() {
+		slog.Info("join: Consumidor finalizado")
 		err = errors.Join(err, join.inputQueue.Close(), join.outputQueue.Close())
 	}()
 
 	var processingErr error
-	consumeErr := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	consumeErr := middleware.StartConsumingContext(ctx, join.inputQueue, func(msg middleware.Message, ack, nack func()) {
 		if processingErr != nil {
 			return
 		}
@@ -129,7 +131,7 @@ func (join *Join) handleDataMessage(clientID uint64, records []fruititem.FruitIt
 }
 
 /*
- * Registra cada Aggregation una vez por cliente 
+ * Registra cada Aggregation una vez por cliente
  * envia el top global cuando terminaron todas
  */
 func (join *Join) handleEndOfRecordsMessage(clientID uint64, aggregationID int) error {

@@ -1,6 +1,7 @@
 package aggregation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -74,14 +75,15 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 /*
  * Confirma mensajes procesados correctamente 
  */
-func (aggregation *Aggregation) Run() (err error) {
+func (aggregation *Aggregation) Run(ctx context.Context) (err error) {
 	// retorno los distintos errores
 	defer func() {
+		slog.Info("aggregation: Consumidor finalizado", "aggregation_id", aggregation.id)
 		err = errors.Join(err, aggregation.inputQueue.Close(), aggregation.outputQueue.Close())
 	}()
 
 	var processingErr error
-	consumeErr := aggregation.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	consumeErr := middleware.StartConsumingContext(ctx, aggregation.inputQueue, func(msg middleware.Message, ack, nack func()) {
 		if processingErr != nil {
 			return
 		}

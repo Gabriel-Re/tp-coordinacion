@@ -1,6 +1,7 @@
 package sum
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -35,9 +36,9 @@ func (sum *Sum) prepareDispatcher(config SumConfig, connSettings middleware.Conn
 /*
  * Reparte mensajes completos por turnos y envia cada EOF a todas las colas de trabajo
  */
-func (sum *Sum) runDispatcher() error {
+func (sum *Sum) runDispatcher(ctx context.Context) error {
 	nextSum := 0
-	return consumeMessages(sum.dispatchQueue, func(msg middleware.Message) error {
+	return consumeMessages(ctx, sum.dispatchQueue, func(msg middleware.Message) error {
 		message, err := inner.DeserializeMessage(&msg)
 		if err != nil {
 			return fmt.Errorf("deserializar mensaje para distribuir: %w", err)

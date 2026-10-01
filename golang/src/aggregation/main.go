@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/aggregation"
 )
@@ -69,6 +72,9 @@ func loadConfig() (aggregation.AggregationConfig, error) {
 }
 
 func run() int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	config, err := loadConfig()
 	if err != nil {
 		slog.Error("aggregation: Error al cargar configuracion", "err", err)
@@ -81,10 +87,11 @@ func run() int {
 		return 1
 	}
 
-	if err := server.Run(); err != nil {
+	if err := server.Run(ctx); err != nil {
 		slog.Error("aggregation: Error de ejecucion", "err", err)
 		return 1
 	}
+	slog.Info("aggregation: Cierre completado", "aggregation_id", config.Id)
 	return 0
 }
 
